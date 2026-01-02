@@ -115,13 +115,60 @@ def synchronize_playlists(
     # Step 2: Merge server data into global state + Detect deletions
     logger.info("[Playlist] Merging playlist data from all servers...")
     
+    # Track items validly deleted in this cycle to prevent re-addition
+    # Key: (user_name, playlist_title), Value: list[MediaIdentifiers]
+    trashed_registry: dict[tuple[str, str], list] = {}
+
+    # Phase 1: Detect Deletions FIRST
     for server_name, s_users in server_playlists.items():
         if server_name not in server_id_map:
             continue
         s_id = server_id_map[server_name]
         
         for s_user, s_pl in s_users.items():
-            # User mapping
+            l_user = s_user
+            if user_mapping:
+                l_user = search_mapping(user_mapping, s_user) or s_user
+            
+            if l_user not in state.users:
+                continue
+            
+            user_state = state.users[l_user]
+            
+            for pl_title, playlist in s_pl.playlists.items():
+                if pl_title not in user_state.playlists:
+                    continue
+                
+                state_pl = user_state.playlists[pl_title]
+                
+                # Detect deletions: Items in global state but missing from server
+                items_to_remove = []
+                for st_item in state_pl.items:
+                    # Check if partially synced to this server before
+                    if s_id in st_item.synced_to_servers:
+                        # Was synced before but missing now -> Deleted!
+                        found_in_server = any(check_same_identifiers(st_item, s_item) for s_item in playlist.items)
+                        if not found_in_server:
+                            logger.info(f"[Playlist] Item deletion detected: '{st_item.title}' removed from '{pl_title}' on {server_name}")
+                            items_to_remove.append(st_item)
+                
+                # Apply deletions and register them
+                if items_to_remove:
+                    reg_key = (l_user, pl_title)
+                    if reg_key not in trashed_registry:
+                        trashed_registry[reg_key] = []
+                    trashed_registry[reg_key].extend(items_to_remove)
+
+                    for item in items_to_remove:
+                        if item in state_pl.items:
+                            state_pl.items.remove(item)
+
+    # Phase 2: Merge Additions (Skip trashed items)
+    for server_name, s_users in server_playlists.items():
+        if server_name not in server_id_map:
+            continue
+        
+        for s_user, s_pl in s_users.items():
             l_user = s_user
             if user_mapping:
                 l_user = search_mapping(user_mapping, s_user) or s_user
@@ -137,9 +184,15 @@ def synchronize_playlists(
                     user_state.playlists[pl_title] = Playlist(title=pl_title, items=[])
                 
                 state_pl = user_state.playlists[pl_title]
+                reg_key = (l_user, pl_title)
                 
                 # Merge items
                 for s_item in playlist.items:
+                    # Check if this item was just deleted on another server
+                    if reg_key in trashed_registry:
+                        if any(check_same_identifiers(s_item, t_item) for t_item in trashed_registry[reg_key]):
+                            continue # Skip re-adding deleted item
+
                     found = False
                     for st_item in state_pl.items:
                         if check_same_identifiers(s_item, st_item):
@@ -151,21 +204,6 @@ def synchronize_playlists(
                     if not found:
                         # Add new item
                         state_pl.items.append(s_item)
-                
-                # Detect deletions: Items in global state but missing from server
-                items_to_remove = []
-                for st_item in state_pl.items:
-                    # Check if partially synced to this server before
-                    if s_id in st_item.synced_to_servers:
-                        # Was synced before but missing now -> Deleted!
-                        found_in_server = any(check_same_identifiers(st_item, s_item) for s_item in playlist.items)
-                        if not found_in_server:
-                            logger.info(f"[Playlist] Item deletion detected: '{st_item.title}' removed from '{pl_title}' on {server_name}")
-                            items_to_remove.append(st_item)
-                
-                # Apply deletions
-                for item in items_to_remove:
-                    state_pl.items.remove(item)
     
     # Step 3: Mark already-synced items (First run optimization)
     logger.info("[Playlist] Marking already-synced items...")
