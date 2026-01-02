@@ -1,0 +1,14 @@
+# Sync watched status between media servers locally
+
+services:
+  plex_sync:
+    build:
+      context: .
+      dockerfile: Dockerfile.slim
+    container_name: plex_sync
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ./config:/config
